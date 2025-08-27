@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# nincat: A colorful, verbose bash-ish netcat using /dev/tcp
+
+usage() {
+  cat <<EOF
+Usage: $0 [--no-color] <host> <port>
+
+Options:
+  --no-color   Disable ANSI colors.
+  -h, --help   Show this help.
+
+Examples:
+  $0 example.com 80
+  $0 whois.ripe.net 43
+EOF
+}
+
+# ---------- args ----------
+COLOR=1
+HOST=""
+PORT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-color) COLOR=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage; exit 2
+      ;;
+    *)
+      if [[ -z "$HOST" ]]; then HOST="$1"
+      elif [[ -z "$PORT" ]]; then PORT="$1"
+      else
+        echo "Unexpected argument: $1" >&2; usage; exit 2
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$HOST" || -z "$PORT" ]]; then
+  usage; exit 1
+fi
+
+# ---------- colors ----------
+if [[ $COLOR -eq 1 ]]; then
+  BOLD=$'\e[1m'; DIM=$'\e[2m'; RESET=$'\e[0m'
+  RED=$'\e[31m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; BLUE=$'\e[34m'; MAGENTA=$'\e[35m'; CYAN=$'\e[36m'
+else
+  BOLD=""; DIM=""; RESET=""
+  RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""
+fi
+
+prefix() {
+  # $1 = color, $2 = label, rest = message
+  local c="$1" l="$2"; shift 2
+  printf "%b[%s]%b %s\n" "$c" "$l" "$RESET" "$*"
+}
+
+hr() {
+  printf "%b—%b\n" "$DIM" "$RESET"
+}
+
+# ---------- connect ----------
+prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} ..."
+exec 3<>/dev/tcp/${HOST}/${PORT} || {
+  prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT}"
+  exit 1
+}
+
+prefix "$GREEN" "+" "Connected. Press Ctrl+C to exit."
+hr
+
+# ---------- traps (match `working` style) ----------
+CAT_PID=""
+control_c() {
+  echo
+  prefix "$MAGENTA" "!" "Caught SIGINT, closing..."
+  [[ -n "$CAT_PID" ]] && kill "$CAT_PID" 2>/dev/null
+  exec 3<&- 3>&-
+  prefix "$BLUE" "*" "Connection closed."
+  exit 130
+}
+
+trap control_c SIGINT
+
+# ---------- I/O ----------
+# Binary-safe mode: simple passthrough
+# Background: read from socket -> stdout
+cat <&3 &
+CAT_PID=$!
+
+# Foreground: stdin -> socket
+cat >&3
+
+# If remote closes, wait and exit gracefully.
+wait "$CAT_PID"
+prefix "$BLUE" "*" "Remote closed connection."
+exec 3<&- 3>&-
+exit 0
