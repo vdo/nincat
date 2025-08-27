@@ -1,2 +1,2 @@
 # nincat
-A basic netcat based on bash
+A basic netcat in bash
