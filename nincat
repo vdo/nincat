@@ -16,7 +16,7 @@ Examples:
   $0 example.com 80
   $0 -c example.com 80 <<< 'GET / HTTP/1.0'
   $0 -z -w 5 example.com 22
-  $0 whois.ripe.net 43
+  $0 -c whois.ripe.net 43 <<< "example.com"
 EOF
 }
 
