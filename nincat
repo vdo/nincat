@@ -7,7 +7,6 @@ Usage: $0 [options] <host> <port>
 
 Options:
   -c           Send CRLF as line-ending.
-  -u           Use UDP instead of TCP.
   -z           Zero-I/O mode, just scan for open ports (TCP only).
   -w <sec>     Timeout for connections.
   --no-color   Disable ANSI colors.
@@ -16,7 +15,6 @@ Options:
 Examples:
   $0 example.com 80
   $0 -c example.com 80 <<< 'GET / HTTP/1.0'
-  $0 -u 192.168.1.1 53
   $0 -z -w 5 example.com 22
   $0 whois.ripe.net 43
 EOF
@@ -26,14 +24,12 @@ EOF
 COLOR=1
 HOST=""
 PORT=""
-PROTOCOL="tcp"
 Z_FLAG=0
 TIMEOUT=0
 CRLF_FLAG=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -u) PROTOCOL="udp"; shift ;;
     -c) CRLF_FLAG=1; shift ;;
     -z) Z_FLAG=1; shift ;;
     -w)
@@ -83,67 +79,55 @@ hr() {
 }
 
 # ---------- connect ----------
-if [[ $Z_FLAG -eq 1 && "$PROTOCOL" == "udp" ]]; then
-  prefix "$RED" "!" "UDP scanning is not supported in zero-I/O mode."
-  exit 2
-fi
-
 if [[ $Z_FLAG -eq 1 ]]; then
-  prefix "$CYAN" "*" "Scanning ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} (${PROTOCOL}) ..."
-  # In scan mode, we only support TCP.
+  prefix "$CYAN" "*" "Scanning ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} ..."
   cmd="(exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null"
   if [[ $TIMEOUT -gt 0 ]]; then
     cmd="timeout $TIMEOUT bash -c '$cmd'"
   fi
 
   if eval "$cmd"; then
-    prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [tcp] succeeded!"
+    prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} succeeded!"
     exit 0
   else
-    prefix "$RED" "!" "Connection to ${HOST}:${PORT} [tcp] failed or timed out."
+    prefix "$RED" "!" "Connection to ${HOST}:${PORT} failed or timed out."
     exit 1
   fi
 fi
 
-prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} (${PROTOCOL}) ..."
+prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} ..."
 
-# For TCP, the timeout is for the connection attempt.
-# For UDP, the socket opens immediately; timeout applies to I/O.
-if [[ "$PROTOCOL" == "tcp" ]]; then
-  if [[ $TIMEOUT -gt 0 ]]; then
-    # Use coproc to run the connection in the background with a timeout.
-    coproc NC_CONN { timeout "$TIMEOUT" bash -c "exec 3<>/dev/tcp/${HOST}/${PORT}; while true; do sleep 1; done"; }
-    # Wait for the connection to establish or fail.
-    sleep 0.1
-    if ! kill -0 ${NC_CONN_PID} 2>/dev/null; then
-      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT} (tcp) (timed out)"
-      exit 1
+if [[ $TIMEOUT -gt 0 ]]; then
+  # Use coproc to run the connection in the background with a timeout.
+  coproc NC_CONN { timeout "$TIMEOUT" bash -c "exec 3<>/dev/tcp/${HOST}/${PORT}" 2>/dev/null; }
+
+  # Wait for the coproc to finish to get the exit code.
+  wait "${NC_CONN_PID}" 2>/dev/null
+  exit_code=$?
+
+  if [[ $exit_code -ne 0 ]]; then
+    # 124 is the exit code for `timeout` command when it times out.
+    if [[ $exit_code -eq 124 ]]; then
+      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT} (timed out)"
+    else
+      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT}"
     fi
-    # Redirect the coproc's file descriptor to our main script's fd 3.
-    exec 3<>${NC_CONN[0]}
-    # Close the original coproc file descriptor.
-    exec {NC_CONN[0]}<&-
-  else
-    # Original behavior without timeout
-    exec 3<>/dev/tcp/${HOST}/${PORT} || {
-      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT} (tcp)"
-      exit 1
-    }
-  fi
-else # UDP
-  exec 3<>/dev/udp/${HOST}/${PORT} || {
-    prefix "$RED" "!" "Failed to open UDP socket for ${HOST}:${PORT}"
     exit 1
-  }
-  # With UDP, the 'connection' is immediate. We can do a quick check to see if it's likely open.
-  echo -n >&3
-  if ! read -t 0.2 -u 3; then
-    if [[ $? < 128 ]]; then
-      prefix "$RED" "!" "Connection to ${HOST}:${PORT} (udp) failed (port likely closed)."
-      exec 3<&- && exit 1
-    fi
-    # Timeout is expected for most UDP services, so we continue.
   fi
+
+  # Redirect the coproc's file descriptor to our main script's fd 3.
+  exec 3<&${NC_CONN[0]} 3>&${NC_CONN[1]}
+  # Close the original coproc file descriptors.
+  exec {NC_CONN[0]}<&- {NC_CONN[1]}>&-
+else
+  # Original behavior without timeout. Redirect stderr to /dev/null to avoid printing
+  # the default "connection refused" message, as we handle it ourselves.
+  (exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null
+  if [[ $? -ne 0 ]]; then
+    prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT}"
+    exit 1
+  fi
+  exec 3<>/dev/tcp/${HOST}/${PORT}
 fi
 
 prefix "$GREEN" "+" "Connected. Press Ctrl+C to exit."
