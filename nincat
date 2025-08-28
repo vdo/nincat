@@ -8,7 +8,7 @@ Usage: $0 [options] <host> <port>
 Options:
   -c           Send CRLF as line-ending.
   -u           Use UDP instead of TCP.
-  -z           Zero-I/O mode, just scan for open ports.
+  -z           Zero-I/O mode, just scan for open ports (TCP only).
   -w <sec>     Timeout for connections.
   --no-color   Disable ANSI colors.
   -h, --help   Show this help.
@@ -83,41 +83,25 @@ hr() {
 }
 
 # ---------- connect ----------
+if [[ $Z_FLAG -eq 1 && "$PROTOCOL" == "udp" ]]; then
+  prefix "$RED" "!" "UDP scanning is not supported in zero-I/O mode."
+  exit 2
+fi
+
 if [[ $Z_FLAG -eq 1 ]]; then
   prefix "$CYAN" "*" "Scanning ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} (${PROTOCOL}) ..."
-  if [[ "$PROTOCOL" == "tcp" ]]; then
-    cmd="(exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null"
-    if [[ $TIMEOUT -gt 0 ]]; then
-      cmd="timeout $TIMEOUT bash -c '$cmd'"
-    fi
+  # In scan mode, we only support TCP.
+  cmd="(exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null"
+  if [[ $TIMEOUT -gt 0 ]]; then
+    cmd="timeout $TIMEOUT bash -c '$cmd'"
+  fi
 
-    if eval "$cmd"; then
-      prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [tcp] succeeded!"
-      exit 0
-    else
-      prefix "$RED" "!" "Connection to ${HOST}:${PORT} [tcp] failed or timed out."
-      exit 1
-    fi
-  else # UDP
-    # For UDP, we can't just check the connection. We send a packet and see if we get an error.
-    local check_timeout=${TIMEOUT:-1} # Use 1s default timeout for UDP scan
-    exec 3<>/dev/udp/${HOST}/${PORT} || exit 1 # Should not fail
-    echo -n >&3 # Send a 0-byte probe
-    if ! read -t "$check_timeout" -u 3; then
-      # Read timed out ($? > 128) or failed. Timeout means open/filtered.
-      # Immediate fail means ICMP port unreachable was received.
-      if [[ $? -gt 128 ]]; then
-        prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [udp] succeeded!"
-        exec 3<&- && exit 0
-      else
-        prefix "$RED" "!" "Connection to ${HOST}:${PORT} [udp] failed (port closed)."
-        exec 3<&- && exit 1
-      fi
-    else
-      # Got a response
-      prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [udp] succeeded! (got response)"
-      exec 3<&- && exit 0
-    fi
+  if eval "$cmd"; then
+    prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [tcp] succeeded!"
+    exit 0
+  else
+    prefix "$RED" "!" "Connection to ${HOST}:${PORT} [tcp] failed or timed out."
+    exit 1
   fi
 fi
 
