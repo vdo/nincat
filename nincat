@@ -3,14 +3,21 @@
 
 usage() {
   cat <<EOF
-Usage: $0 [--no-color] <host> <port>
+Usage: $0 [options] <host> <port>
 
 Options:
+  -c           Send CRLF as line-ending.
+  -u           Use UDP instead of TCP.
+  -z           Zero-I/O mode, just scan for open ports.
+  -w <sec>     Timeout for connections.
   --no-color   Disable ANSI colors.
   -h, --help   Show this help.
 
 Examples:
   $0 example.com 80
+  $0 -c example.com 80 <<< 'GET / HTTP/1.0'
+  $0 -u 192.168.1.1 53
+  $0 -z -w 5 example.com 22
   $0 whois.ripe.net 43
 EOF
 }
@@ -19,9 +26,22 @@ EOF
 COLOR=1
 HOST=""
 PORT=""
+PROTOCOL="tcp"
+Z_FLAG=0
+TIMEOUT=0
+CRLF_FLAG=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -u) PROTOCOL="udp"; shift ;;
+    -c) CRLF_FLAG=1; shift ;;
+    -z) Z_FLAG=1; shift ;;
+    -w)
+      if [[ -z "$2" || ! "$2" =~ ^[0-9]+$ ]]; then
+        echo "Error: -w requires a numeric argument." >&2; exit 2
+      fi
+      TIMEOUT="$2"; shift 2
+      ;;
     --no-color) COLOR=0; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)
@@ -63,11 +83,84 @@ hr() {
 }
 
 # ---------- connect ----------
-prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} ..."
-exec 3<>/dev/tcp/${HOST}/${PORT} || {
-  prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT}"
-  exit 1
-}
+if [[ $Z_FLAG -eq 1 ]]; then
+  prefix "$CYAN" "*" "Scanning ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} (${PROTOCOL}) ..."
+  if [[ "$PROTOCOL" == "tcp" ]]; then
+    cmd="(exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null"
+    if [[ $TIMEOUT -gt 0 ]]; then
+      cmd="timeout $TIMEOUT bash -c '$cmd'"
+    fi
+
+    if eval "$cmd"; then
+      prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [tcp] succeeded!"
+      exit 0
+    else
+      prefix "$RED" "!" "Connection to ${HOST}:${PORT} [tcp] failed or timed out."
+      exit 1
+    fi
+  else # UDP
+    # For UDP, we can't just check the connection. We send a packet and see if we get an error.
+    local check_timeout=${TIMEOUT:-1} # Use 1s default timeout for UDP scan
+    exec 3<>/dev/udp/${HOST}/${PORT} || exit 1 # Should not fail
+    echo -n >&3 # Send a 0-byte probe
+    if ! read -t "$check_timeout" -u 3; then
+      # Read timed out ($? > 128) or failed. Timeout means open/filtered.
+      # Immediate fail means ICMP port unreachable was received.
+      if [[ $? -gt 128 ]]; then
+        prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [udp] succeeded!"
+        exec 3<&- && exit 0
+      else
+        prefix "$RED" "!" "Connection to ${HOST}:${PORT} [udp] failed (port closed)."
+        exec 3<&- && exit 1
+      fi
+    else
+      # Got a response
+      prefix "$GREEN" "+" "Connection to ${HOST}:${PORT} [udp] succeeded! (got response)"
+      exec 3<&- && exit 0
+    fi
+  fi
+fi
+
+prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} (${PROTOCOL}) ..."
+
+# For TCP, the timeout is for the connection attempt.
+# For UDP, the socket opens immediately; timeout applies to I/O.
+if [[ "$PROTOCOL" == "tcp" ]]; then
+  if [[ $TIMEOUT -gt 0 ]]; then
+    # Use coproc to run the connection in the background with a timeout.
+    coproc NC_CONN { timeout "$TIMEOUT" bash -c "exec 3<>/dev/tcp/${HOST}/${PORT}; while true; do sleep 1; done"; }
+    # Wait for the connection to establish or fail.
+    sleep 0.1
+    if ! kill -0 ${NC_CONN_PID} 2>/dev/null; then
+      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT} (tcp) (timed out)"
+      exit 1
+    fi
+    # Redirect the coproc's file descriptor to our main script's fd 3.
+    exec 3<>${NC_CONN[0]}
+    # Close the original coproc file descriptor.
+    exec {NC_CONN[0]}<&-
+  else
+    # Original behavior without timeout
+    exec 3<>/dev/tcp/${HOST}/${PORT} || {
+      prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT} (tcp)"
+      exit 1
+    }
+  fi
+else # UDP
+  exec 3<>/dev/udp/${HOST}/${PORT} || {
+    prefix "$RED" "!" "Failed to open UDP socket for ${HOST}:${PORT}"
+    exit 1
+  }
+  # With UDP, the 'connection' is immediate. We can do a quick check to see if it's likely open.
+  echo -n >&3
+  if ! read -t 0.2 -u 3; then
+    if [[ $? < 128 ]]; then
+      prefix "$RED" "!" "Connection to ${HOST}:${PORT} (udp) failed (port likely closed)."
+      exec 3<&- && exit 1
+    fi
+    # Timeout is expected for most UDP services, so we continue.
+  fi
+fi
 
 prefix "$GREEN" "+" "Connected. Press Ctrl+C to exit."
 hr
@@ -86,13 +179,19 @@ control_c() {
 trap control_c SIGINT
 
 # ---------- I/O ----------
-# Binary-safe mode: simple passthrough
 # Background: read from socket -> stdout
 cat <&3 &
 CAT_PID=$!
 
 # Foreground: stdin -> socket
-cat >&3
+if [[ $CRLF_FLAG -eq 1 ]]; then
+  # In CRLF mode, we use sed to convert line endings.
+  # This is not binary-safe.
+  sed 's/$/\r/' >&3
+else
+  # Binary-safe mode: simple passthrough
+  cat >&3
+fi
 
 # If remote closes, wait and exit gracefully.
 wait "$CAT_PID"
