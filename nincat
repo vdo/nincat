@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# nincat: A colorful, verbose bash-ish netcat using /dev/tcp
 
 usage() {
   cat <<EOF
@@ -20,7 +19,6 @@ Examples:
 EOF
 }
 
-# ---------- args ----------
 COLOR=1
 HOST=""
 PORT=""
@@ -69,7 +67,6 @@ else
 fi
 
 prefix() {
-  # $1 = color, $2 = label, rest = message
   local c="$1" l="$2"; shift 2
   printf "%b[%s]%b %s\n" "$c" "$l" "$RESET" "$*"
 }
@@ -98,10 +95,8 @@ fi
 prefix "$CYAN" "*" "Connecting to ${BOLD}${HOST}${RESET}${CYAN}:${BOLD}${PORT}${RESET}${CYAN} ..."
 
 if [[ $TIMEOUT -gt 0 ]]; then
-  # Use coproc to run the connection in the background with a timeout.
   coproc NC_CONN { timeout "$TIMEOUT" bash -c "exec 3<>/dev/tcp/${HOST}/${PORT}" 2>/dev/null; }
 
-  # Wait for the coproc to finish to get the exit code.
   wait "${NC_CONN_PID}" 2>/dev/null
   exit_code=$?
 
@@ -120,8 +115,6 @@ if [[ $TIMEOUT -gt 0 ]]; then
   # Close the original coproc file descriptors.
   exec {NC_CONN[0]}<&- {NC_CONN[1]}>&-
 else
-  # Original behavior without timeout. Redirect stderr to /dev/null to avoid printing
-  # the default "connection refused" message, as we handle it ourselves.
   (exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null
   if [[ $? -ne 0 ]]; then
     prefix "$RED" "!" "Failed to connect to ${HOST}:${PORT}"
@@ -133,7 +126,6 @@ fi
 prefix "$GREEN" "+" "Connected. Press Ctrl+C to exit."
 hr
 
-# ---------- traps (match `working` style) ----------
 CAT_PID=""
 control_c() {
   echo
@@ -146,22 +138,14 @@ control_c() {
 
 trap control_c SIGINT
 
-# ---------- I/O ----------
-# Background: read from socket -> stdout
 cat <&3 &
 CAT_PID=$!
-
-# Foreground: stdin -> socket
 if [[ $CRLF_FLAG -eq 1 ]]; then
-  # In CRLF mode, we use sed to convert line endings.
-  # This is not binary-safe.
   sed 's/$/\r/' >&3
 else
-  # Binary-safe mode: simple passthrough
   cat >&3
 fi
 
-# If remote closes, wait and exit gracefully.
 wait "$CAT_PID"
 prefix "$BLUE" "*" "Remote closed connection."
 exec 3<&- 3>&-
