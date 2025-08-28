@@ -1,5 +1,5 @@
-# nincat
-A basic netcat in bash
+# nincat 🐈‍⬛
+A basic TCP netcat in bash
 
 ```
 Usage: ./nincat [options] <host> <port>
